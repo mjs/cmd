@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
+	"github.com/juju/gnuflag"
 	"github.com/juju/loggo"
-	"launchpad.net/gnuflag"
 )
 
 var logger = loggo.GetLogger("cmd")
@@ -56,10 +56,15 @@ type SuperCommandParams struct {
 	// in the help output.
 	NotifyHelp func([]string)
 
-	Name            string
-	Purpose         string
-	Doc             string
-	Log             *Log
+	Name    string
+	Purpose string
+	Doc     string
+	// Log holds the Log value associated with the supercommand. If it's nil,
+	// no logging flags will be configured.
+	Log *Log
+	// GlobalFlags specifies a value that can add more global flags to the
+	// supercommand which will also be available on all subcommands.
+	GlobalFlags     FlagAdder
 	MissingCallback MissingCallback
 	Aliases         []string
 	Version         string
@@ -69,23 +74,39 @@ type SuperCommandParams struct {
 	// values, that is used to change default behaviour of commands in order
 	// to add flags, or provide short cuts to longer commands.
 	UserAliasesFilename string
+
+	// FlagKnownAs allows different projects to customise what their flags are
+	// known as, e.g. 'flag', 'option', 'item'. All error/log messages
+	// will use that name when referring to an individual items/flags in this command.
+	// For example, if this value is 'option', the default message 'value for flag'
+	// will become 'value for option'.
+	FlagKnownAs string
+}
+
+// FlagAdder represents a value that has associated flags.
+type FlagAdder interface {
+	// AddsFlags adds the value's flags to the given flag set.
+	AddFlags(*gnuflag.FlagSet)
 }
 
 // NewSuperCommand creates and initializes a new `SuperCommand`, and returns
 // the fully initialized structure.
 func NewSuperCommand(params SuperCommandParams) *SuperCommand {
 	command := &SuperCommand{
-		Name:                params.Name,
-		Purpose:             params.Purpose,
-		Doc:                 params.Doc,
-		Log:                 params.Log,
+		Name:    params.Name,
+		Purpose: params.Purpose,
+		Doc:     params.Doc,
+		Log:     params.Log,
+		Aliases: params.Aliases,
+
+		globalFlags:         params.GlobalFlags,
 		usagePrefix:         params.UsagePrefix,
 		missingCallback:     params.MissingCallback,
-		Aliases:             params.Aliases,
 		version:             params.Version,
 		notifyRun:           params.NotifyRun,
 		notifyHelp:          params.NotifyHelp,
 		userAliasesFilename: params.UserAliasesFilename,
+		FlagKnownAs:         params.FlagKnownAs,
 	}
 	command.init()
 	return command
@@ -94,7 +115,6 @@ func NewSuperCommand(params SuperCommandParams) *SuperCommand {
 // DeprecationCheck is used to provide callbacks to determine if
 // a command is deprecated or obsolete.
 type DeprecationCheck interface {
-
 	// Deprecated aliases emit a warning when executed. If the command is
 	// deprecated, the second return value recommends what to use instead.
 	Deprecated() (bool, string)
@@ -123,6 +143,7 @@ type SuperCommand struct {
 	Doc                 string
 	Log                 *Log
 	Aliases             []string
+	globalFlags         FlagAdder
 	version             string
 	usagePrefix         string
 	userAliasesFilename string
@@ -139,6 +160,13 @@ type SuperCommand struct {
 	missingCallback     MissingCallback
 	notifyRun           func(string)
 	notifyHelp          func([]string)
+
+	// FlagKnownAs allows different projects to customise what their flags are
+	// known as, e.g. 'flag', 'option', 'item'. All error/log messages
+	// will use that name when referring to an individual items/flags in this command.
+	// For example, if this value is 'option', the default message 'value for flag'
+	// will become 'value for option'.
+	FlagKnownAs string
 }
 
 // IsSuperCommand implements Command.IsSuperCommand
@@ -150,12 +178,16 @@ func (c *SuperCommand) init() {
 	if c.subcmds != nil {
 		return
 	}
+	if c.FlagKnownAs == "" {
+		// For backward compatibility, the default is 'flag'.
+		c.FlagKnownAs = "flag"
+	}
 	c.help = &helpCommand{
 		super: c,
 	}
 	c.help.init()
 	c.subcmds = map[string]commandReference{
-		"help": commandReference{command: c.help},
+		"help": {command: c.help},
 	}
 	if c.version != "" {
 		c.subcmds["version"] = commandReference{
@@ -295,7 +327,7 @@ func (c *SuperCommand) describeCommands(simple bool) string {
 		info := action.command.Info()
 		purpose := info.Purpose
 		if action.alias != "" {
-			purpose = "alias for '" + action.alias + "'"
+			purpose = "Alias for '" + action.alias + "'."
 		}
 		result = append(result, fmt.Sprintf(lineFormat, longest, name, purpose))
 	}
@@ -308,6 +340,7 @@ func (c *SuperCommand) Info() *Info {
 	if c.action.command != nil {
 		info := *c.action.command.Info()
 		info.Name = fmt.Sprintf("%s %s", c.Name, info.Name)
+		info.FlagKnownAs = c.FlagKnownAs
 		return &info
 	}
 	docParts := []string{}
@@ -318,15 +351,16 @@ func (c *SuperCommand) Info() *Info {
 		docParts = append(docParts, cmds)
 	}
 	return &Info{
-		Name:    c.Name,
-		Args:    "<command> ...",
-		Purpose: c.Purpose,
-		Doc:     strings.Join(docParts, "\n\n"),
-		Aliases: c.Aliases,
+		Name:        c.Name,
+		Args:        "<command> ...",
+		Purpose:     c.Purpose,
+		Doc:         strings.Join(docParts, "\n\n"),
+		Aliases:     c.Aliases,
+		FlagKnownAs: c.FlagKnownAs,
 	}
 }
 
-const helpPurpose = "show help on a command or other topic"
+const helpPurpose = "Show help on a command or other topic."
 
 // SetCommonFlags creates a new "commonflags" flagset, whose
 // flags are shared with the argument f; this enables us to
@@ -335,14 +369,17 @@ func (c *SuperCommand) SetCommonFlags(f *gnuflag.FlagSet) {
 	if c.Log != nil {
 		c.Log.AddFlags(f)
 	}
+	if c.globalFlags != nil {
+		c.globalFlags.AddFlags(f)
+	}
 	f.BoolVar(&c.showHelp, "h", false, helpPurpose)
 	f.BoolVar(&c.showHelp, "help", false, "")
 	// In the case where we are providing the basis for a plugin,
 	// plugins are required to support the --description argument.
 	// The Purpose attribute will be printed (if defined), allowing
 	// plugins to provide a sensible line of text for 'juju help plugins'.
-	f.BoolVar(&c.showDescription, "description", false, "")
-	c.commonflags = gnuflag.NewFlagSet(c.Info().Name, gnuflag.ContinueOnError)
+	f.BoolVar(&c.showDescription, "description", false, "Show short description of plugin, if any")
+	c.commonflags = gnuflag.NewFlagSetWithFlagKnownAs(c.Info().Name, gnuflag.ContinueOnError, FlagAlias(c, "flag"))
 	c.commonflags.SetOutput(ioutil.Discard)
 	f.VisitAll(func(flag *gnuflag.Flag) {
 		c.commonflags.Var(flag.Value, flag.Name, flag.Usage)
@@ -407,7 +444,7 @@ func (c *SuperCommand) Init(args []string) error {
 	args = args[1:]
 	subcmd := c.action.command
 	if subcmd.IsSuperCommand() {
-		f := gnuflag.NewFlagSet(c.Info().Name, gnuflag.ContinueOnError)
+		f := gnuflag.NewFlagSetWithFlagKnownAs(c.Info().Name, gnuflag.ContinueOnError, FlagAlias(subcmd, "flag"))
 		f.SetOutput(ioutil.Discard)
 		subcmd.SetFlags(f)
 	} else {
@@ -455,8 +492,8 @@ func (c *SuperCommand) Run(ctx *Context) error {
 	}
 	err := c.action.command.Run(ctx)
 	if err != nil && !IsErrSilent(err) {
-		logger.Errorf("%v", err)
-		logger.Debugf("(error details: %v)", errors.Details(err))
+		WriteError(ctx.Stderr, err)
+		logger.Debugf("error stack: \n%v", errors.ErrorStack(err))
 		// Now that this has been logged, don't log again in cmd.Main.
 		if !IsRcPassthroughError(err) {
 			err = ErrSilent

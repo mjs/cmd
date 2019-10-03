@@ -4,7 +4,7 @@
 package cmd
 
 import (
-	"launchpad.net/gnuflag"
+	"github.com/juju/gnuflag"
 )
 
 // versionCommand is a cmd.Command that prints the current version.
@@ -23,7 +23,7 @@ func newVersionCommand(version string) *versionCommand {
 func (v *versionCommand) Info() *Info {
 	return &Info{
 		Name:    "version",
-		Purpose: "print the current version",
+		Purpose: "Print the current version.",
 	}
 }
 

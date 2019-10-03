@@ -7,8 +7,8 @@ import (
 	"bytes"
 	"io/ioutil"
 
+	"github.com/juju/gnuflag"
 	gc "gopkg.in/check.v1"
-	"launchpad.net/gnuflag"
 
 	"github.com/juju/cmd"
 )
@@ -24,7 +24,8 @@ func NewFlagSet() *gnuflag.FlagSet {
 // InitCommand will create a new flag set, and call the Command's SetFlags and
 // Init methods with the appropriate args.
 func InitCommand(c cmd.Command, args []string) error {
-	f := NewFlagSet()
+	f := gnuflag.NewFlagSetWithFlagKnownAs(c.Info().Name, gnuflag.ContinueOnError, cmd.FlagAlias(c, "flag"))
+	f.SetOutput(ioutil.Discard)
 	c.SetFlags(f)
 	if err := f.Parse(c.AllowInterspersedFlags(), args); err != nil {
 		return err
@@ -71,20 +72,22 @@ func Stderr(ctx *cmd.Context) string {
 // the actual running of the command.  Access to the resulting output streams
 // is provided through the returned context instance.
 func RunCommand(c *gc.C, com cmd.Command, args ...string) (*cmd.Context, error) {
-	if err := InitCommand(com, args); err != nil {
-		return nil, err
-	}
 	var context = Context(c)
-	return context, com.Run(context)
+	return runCommand(context, com, args)
 }
 
 // RunCommandInDir works like RunCommand, but runs with a context that uses dir.
 func RunCommandInDir(c *gc.C, com cmd.Command, args []string, dir string) (*cmd.Context, error) {
-	if err := InitCommand(com, args); err != nil {
-		return nil, err
-	}
 	var context = ContextForDir(c, dir)
-	return context, com.Run(context)
+	return runCommand(context, com, args)
+}
+
+func runCommand(ctx *cmd.Context, com cmd.Command, args []string) (*cmd.Context, error) {
+	if err := InitCommand(com, args); err != nil {
+		cmd.WriteError(ctx.Stderr, err)
+		return ctx, err
+	}
+	return ctx, com.Run(ctx)
 }
 
 // TestInit checks that a command initialises correctly with the given set of
@@ -96,4 +99,15 @@ func TestInit(c *gc.C, com cmd.Command, args []string, errPat string) {
 	} else {
 		c.Assert(err, gc.IsNil)
 	}
+}
+
+// HelpText returns a command's formatted help text.
+func HelpText(command cmd.Command, name string) string {
+	buff := &bytes.Buffer{}
+	info := command.Info()
+	info.Name = name
+	f := gnuflag.NewFlagSetWithFlagKnownAs(info.Name, gnuflag.ContinueOnError, cmd.FlagAlias(command, "flag"))
+	command.SetFlags(f)
+	buff.Write(info.Help(f))
+	return buff.String()
 }

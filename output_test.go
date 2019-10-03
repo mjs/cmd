@@ -4,8 +4,8 @@
 package cmd_test
 
 import (
+	"github.com/juju/gnuflag"
 	gc "gopkg.in/check.v1"
-	"launchpad.net/gnuflag"
 
 	"github.com/juju/cmd"
 	"github.com/juju/cmd/cmdtesting"
@@ -36,7 +36,15 @@ func (c *OutputCommand) Init(args []string) error {
 }
 
 func (c *OutputCommand) Run(ctx *cmd.Context) error {
+	if value, ok := c.value.(overrideFormatter); ok {
+		return c.out.WriteFormatter(ctx, value.formatter, value.value)
+	}
 	return c.out.Write(ctx, c.value)
+}
+
+type overrideFormatter struct {
+	formatter cmd.Formatter
+	value     interface{}
 }
 
 // use a struct to control field ordering.
@@ -61,8 +69,10 @@ var outputTests = map[string][]struct {
 		{"hello", "hello\n"},
 		{"\n\n\n", "\n\n\n\n"},
 		{"foo: bar", "foo: bar\n"},
+		{[]string{}, ""},
 		{[]string{"blam", "dink"}, "blam\ndink\n"},
 		{map[interface{}]interface{}{"foo": "bar"}, "foo: bar\n"},
+		{overrideFormatter{cmd.FormatSmart, "abc\ndef"}, "abc\ndef\n"},
 	},
 	"smart": {
 		{nil, ""},
@@ -76,9 +86,10 @@ var outputTests = map[string][]struct {
 		{"hello", "hello\n"},
 		{"\n\n\n", "\n\n\n\n"},
 		{"foo: bar", "foo: bar\n"},
+		{[]string{}, ""},
 		{[]string{"blam", "dink"}, "blam\ndink\n"},
-		{[2]string{"blam", "dink"}, "blam\ndink\n"},
 		{map[interface{}]interface{}{"foo": "bar"}, "foo: bar\n"},
+		{overrideFormatter{cmd.FormatSmart, "abc\ndef"}, "abc\ndef\n"},
 	},
 	"json": {
 		{nil, "null\n"},
@@ -95,6 +106,7 @@ var outputTests = map[string][]struct {
 		{[]string{}, `[]` + "\n"},
 		{[]string{"blam", "dink"}, `["blam","dink"]` + "\n"},
 		{defaultValue, `{"Juju":1,"Puppet":false}` + "\n"},
+		{overrideFormatter{cmd.FormatSmart, "abc\ndef"}, "abc\ndef\n"},
 	},
 	"yaml": {
 		{nil, ""},
@@ -108,8 +120,10 @@ var outputTests = map[string][]struct {
 		{"hello", "hello\n"},
 		{"\n\n\n", "|2+\n"},
 		{"foo: bar", "'foo: bar'\n"},
+		{[]string{}, "[]\n"},
 		{[]string{"blam", "dink"}, "- blam\n- dink\n"},
 		{defaultValue, "juju: 1\npuppet: false\n"},
+		{overrideFormatter{cmd.FormatSmart, "abc\ndef"}, "abc\ndef\n"},
 	},
 }
 

@@ -18,18 +18,10 @@ import (
 var logger = loggo.GetLogger("juju.test")
 
 type LogSuite struct {
-	testing.CleanupSuite
+	testing.LoggingCleanupSuite
 }
 
 var _ = gc.Suite(&LogSuite{})
-
-func (s *LogSuite) SetUpTest(c *gc.C) {
-	s.CleanupSuite.SetUpTest(c)
-	s.AddCleanup(func(_ *gc.C) {
-		loggo.ResetLoggers()
-		loggo.ResetWriters()
-	})
-}
 
 func newLogWithFlags(c *gc.C, defaultConfig string, flags ...string) *cmd.Log {
 	log := &cmd.Log{
@@ -236,4 +228,15 @@ func (s *LogSuite) TestOutputDebugForcesQuiet(c *gc.C) {
 	ctx.Verbosef("Writing verbose output")
 
 	c.Assert(cmdtesting.Stderr(ctx), gc.Matches, `^.*INFO .* Writing info output\n.*INFO .*Writing verbose output\n.*`)
+}
+
+func (s *LogSuite) TestOutputWarning(c *gc.C) {
+	l := &cmd.Log{Verbose: true, Debug: true}
+	ctx := cmdtesting.Context(c)
+	err := l.Start(ctx)
+	c.Assert(err, gc.IsNil)
+
+	ctx.Warningf("Writing warning output")
+
+	c.Assert(cmdtesting.Stderr(ctx), gc.Matches, `^.* WARN .* Writing warning output\n.*`)
 }

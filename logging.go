@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
+	"github.com/juju/ansiterm"
+	"github.com/juju/gnuflag"
 	"github.com/juju/loggo"
-	"launchpad.net/gnuflag"
+	"github.com/juju/loggo/loggocolor"
 )
 
 // Log supplies the necessary functionality for Commands that wish to set up
@@ -35,7 +36,7 @@ func (l *Log) GetLogWriter(target io.Writer) loggo.Writer {
 	if l.NewWriter != nil {
 		return l.NewWriter(target)
 	}
-	return loggo.NewSimpleWriter(target, &loggo.DefaultFormatter{})
+	return loggocolor.NewWriter(target)
 }
 
 // AddFlags adds appropriate flags to f.
@@ -45,7 +46,7 @@ func (l *Log) AddFlags(f *gnuflag.FlagSet) {
 	f.BoolVar(&l.Verbose, "verbose", false, "show more verbose output")
 	f.BoolVar(&l.Quiet, "q", false, "show no informational output")
 	f.BoolVar(&l.Quiet, "quiet", false, "show no informational output")
-	f.BoolVar(&l.Debug, "debug", false, "equivalent to --show-log --log-config=<root>=DEBUG")
+	f.BoolVar(&l.Debug, "debug", false, "equivalent to --show-log --logging-config=<root>=DEBUG")
 	f.StringVar(&l.Config, "logging-config", l.DefaultConfig, "specify log levels for modules")
 	f.BoolVar(&l.ShowLog, "show-log", false, "if set, write the log file to stderr")
 }
@@ -64,7 +65,7 @@ func (log *Log) Start(ctx *Context) error {
 			return err
 		}
 		writer := log.GetLogWriter(target)
-		err = loggo.RegisterWriter("logfile", writer, loggo.TRACE)
+		err = loggo.RegisterWriter("logfile", writer)
 		if err != nil {
 			return err
 		}
@@ -93,8 +94,8 @@ func (log *Log) Start(ctx *Context) error {
 		loggo.RemoveWriter("default")
 		// Create a simple writer that doesn't show filenames, or timestamps,
 		// and only shows warning or above.
-		writer := loggo.NewSimpleWriter(ctx.Stderr, &warningFormatter{})
-		err := loggo.RegisterWriter("warning", writer, loggo.WARNING)
+		writer := NewWarningWriter(ctx.Stderr)
+		err := loggo.RegisterWriter("warning", writer)
 		if err != nil {
 			return err
 		}
@@ -105,14 +106,6 @@ func (log *Log) Start(ctx *Context) error {
 	// Override the logging config with specified logging config.
 	loggo.ConfigureLoggers(log.Config)
 	return nil
-}
-
-// warningFormatter is a simple loggo formatter that produces something like:
-//   WARNING The message...
-type warningFormatter struct{}
-
-func (*warningFormatter) Format(level loggo.Level, _, _ string, _ int, _ time.Time, message string) string {
-	return fmt.Sprintf("%s %s", level, message)
 }
 
 // NewCommandLogWriter creates a loggo writer for registration
@@ -130,12 +123,30 @@ type commandLogWriter struct {
 }
 
 // Write implements loggo's Writer interface.
-func (s *commandLogWriter) Write(level loggo.Level, name, filename string, line int, timestamp time.Time, message string) {
-	if name == s.name {
-		if level <= loggo.INFO {
-			fmt.Fprintf(s.out, "%s\n", message)
+func (s *commandLogWriter) Write(entry loggo.Entry) {
+	if entry.Module == s.name {
+		if entry.Level <= loggo.INFO {
+			fmt.Fprintf(s.out, "%s\n", entry.Message)
 		} else {
-			fmt.Fprintf(s.err, "%s\n", message)
+			fmt.Fprintf(s.err, "%s\n", entry.Message)
 		}
 	}
+}
+
+type warningWriter struct {
+	writer *ansiterm.Writer
+}
+
+// NewWarningWriter will write out colored severity levels if the writer is
+// outputting to a terminal.
+func NewWarningWriter(writer io.Writer) loggo.Writer {
+	w := &warningWriter{ansiterm.NewWriter(writer)}
+	return loggo.NewMinimumLevelWriter(w, loggo.WARNING)
+}
+
+// Write implements Writer.
+//   WARNING The message...
+func (w *warningWriter) Write(entry loggo.Entry) {
+	loggocolor.SeverityColor[entry.Level].Fprintf(w.writer, entry.Level.String())
+	fmt.Fprintf(w.writer, " %s\n", entry.Message)
 }

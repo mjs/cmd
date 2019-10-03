@@ -8,26 +8,24 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 
+	"github.com/juju/gnuflag"
 	goyaml "gopkg.in/yaml.v2"
-	"launchpad.net/gnuflag"
 )
 
-// Formatter converts an arbitrary object into a []byte.
-type Formatter func(value interface{}) ([]byte, error)
+// Formatter writes the arbitrary object into the writer.
+type Formatter func(writer io.Writer, value interface{}) error
 
-// FormatYaml marshals value to a yaml-formatted []byte, unless value is nil.
-func FormatYaml(value interface{}) ([]byte, error) {
+// FormatYaml writes out value as yaml to the writer, unless value is nil.
+func FormatYaml(writer io.Writer, value interface{}) error {
 	if value == nil {
-		return nil, nil
+		return nil
 	}
 	result, err := goyaml.Marshal(value)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for i := len(result) - 1; i > 0; i-- {
 		if result[i] != '\n' {
@@ -35,11 +33,25 @@ func FormatYaml(value interface{}) ([]byte, error) {
 		}
 		result = result[:i]
 	}
-	return result, nil
+
+	if len(result) > 0 {
+		result = append(result, '\n')
+		_, err = writer.Write(result)
+		return err
+	}
+	return nil
 }
 
-// FormatJson marshals value to a json-formatted []byte.
-var FormatJson = json.Marshal
+// FormatJson writes out value as json.
+func FormatJson(writer io.Writer, value interface{}) error {
+	result, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	result = append(result, '\n')
+	_, err = writer.Write(result)
+	return err
+}
 
 // FormatSmart marshals value into a []byte according to the following rules:
 //   * string:        untouched
@@ -47,39 +59,30 @@ var FormatJson = json.Marshal
 //   * int or float:  converted to sensible strings
 //   * []string:      joined by `\n`s into a single string
 //   * anything else: delegate to FormatYaml
-func FormatSmart(value interface{}) ([]byte, error) {
+func FormatSmart(writer io.Writer, value interface{}) error {
 	if value == nil {
-		return nil, nil
+		return nil
 	}
-	v := reflect.ValueOf(value)
-	switch kind := v.Kind(); kind {
-	case reflect.String:
-		return []byte(value.(string)), nil
-	case reflect.Array:
-		if v.Type().Elem().Kind() == reflect.String {
-			slice := reflect.MakeSlice(reflect.TypeOf([]string(nil)), v.Len(), v.Len())
-			reflect.Copy(slice, v)
-			return []byte(strings.Join(slice.Interface().([]string), "\n")), nil
+	valueStr := ""
+	switch value := value.(type) {
+	case string:
+		valueStr = value
+	case []string:
+		valueStr = strings.Join(value, "\n")
+	case bool:
+		if value {
+			valueStr = "True"
+		} else {
+			valueStr = "False"
 		}
-	case reflect.Slice:
-		if v.Type().Elem().Kind() == reflect.String {
-			return []byte(strings.Join(value.([]string), "\n")), nil
-		}
-	case reflect.Bool:
-		if value.(bool) {
-			return []byte("True"), nil
-		}
-		return []byte("False"), nil
-	case reflect.Float32, reflect.Float64:
-		sv := strconv.FormatFloat(value.(float64), 'f', -1, 64)
-		return []byte(sv), nil
-	case reflect.Map:
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 	default:
-		return nil, fmt.Errorf("cannot marshal %#v", value)
+		return FormatYaml(writer, value)
 	}
-	return FormatYaml(value)
+	if valueStr == "" {
+		return nil
+	}
+	_, err := writer.Write([]byte(valueStr + "\n"))
+	return err
 }
 
 // DefaultFormatters holds the formatters that can be
@@ -133,8 +136,8 @@ func (v *formatterValue) doc() string {
 }
 
 // format runs the chosen formatter on value.
-func (v *formatterValue) format(value interface{}) ([]byte, error) {
-	return v.formatters[v.name](value)
+func (v *formatterValue) format(writer io.Writer, value interface{}) error {
+	return v.formatters[v.name](writer, value)
 }
 
 // Output is responsible for interpreting output-related command line flags
@@ -155,6 +158,27 @@ func (c *Output) AddFlags(f *gnuflag.FlagSet, defaultFormatter string, formatter
 // Write formats and outputs the value as directed by the --format and
 // --output command line flags.
 func (c *Output) Write(ctx *Context, value interface{}) (err error) {
+	formatterName := c.formatter.name
+	formatter := c.formatter.formatters[formatterName]
+	// If the formatter is not one of the default ones, add a new line at the end.
+	// This keeps consistent behaviour with the current code.
+	var newline bool
+	if _, found := DefaultFormatters[formatterName]; !found {
+		newline = true
+	}
+	if err := c.writeFormatter(ctx, formatter, value, newline); err != nil {
+		return err
+	}
+	return nil
+}
+
+// WriteFormatter formats and outputs the value with the given formatter,
+// to the output directed by the --output command line flag.
+func (c *Output) WriteFormatter(ctx *Context, formatter Formatter, value interface{}) (err error) {
+	return c.writeFormatter(ctx, formatter, value, false)
+}
+
+func (c *Output) writeFormatter(ctx *Context, formatter Formatter, value interface{}, newline bool) (err error) {
 	var target io.Writer
 	if c.outPath == "" {
 		target = ctx.Stdout
@@ -167,17 +191,13 @@ func (c *Output) Write(ctx *Context, value interface{}) (err error) {
 		defer f.Close()
 		target = f
 	}
-	bytes, err := c.formatter.format(value)
-	if err != nil {
-		return
+	if err := formatter(target, value); err != nil {
+		return err
 	}
-	if len(bytes) > 0 {
-		_, err = target.Write(bytes)
-		if err == nil {
-			_, err = target.Write([]byte{'\n'})
-		}
+	if newline {
+		fmt.Fprintln(target)
 	}
-	return
+	return nil
 }
 
 func (c *Output) Name() string {

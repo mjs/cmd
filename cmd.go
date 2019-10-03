@@ -14,7 +14,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"launchpad.net/gnuflag"
+	"github.com/juju/ansiterm"
+	"github.com/juju/gnuflag"
+	"github.com/juju/loggo"
+	"github.com/juju/utils"
 )
 
 // RcPassthroughError indicates that a Juju plugin command exited with a
@@ -114,6 +117,13 @@ type Context struct {
 	verbose bool
 }
 
+// Quiet reports whether the command is in "quiet" mode. When
+// this is true, informational output should be suppressed (logger
+// messages can be used instead).
+func (ctx *Context) Quiet() bool {
+	return ctx.quiet
+}
+
 func (ctx *Context) write(format string, params ...interface{}) {
 	output := fmt.Sprintf(format, params...)
 	if !strings.HasSuffix(output, "\n") {
@@ -126,10 +136,27 @@ func (ctx *Context) write(format string, params ...interface{}) {
 // quiet is true the message is logged.
 func (ctx *Context) Infof(format string, params ...interface{}) {
 	if ctx.quiet {
-		logger.Infof(format, params...)
+		//Here we use the Loggo.logger method `Logf` as opposed to
+		//`logger.Infof` to avoid introducing an additional call stack
+		//level (since `Infof` calls `Logf` internally). This is done so
+		//that this function can produce more accurate source location
+		//debug information.
+		logger.Logf(loggo.INFO, format, params...)
 	} else {
 		ctx.write(format, params...)
 	}
+}
+
+// Warningf allows for the logging of messages, at the warning level, from a
+// command's context. This is useful for logging errors which do not cause a
+// command to fail (e.g. an error message used as a deprecation warning that
+// will be upgraded to a real error message at some point in the future.)
+func (ctx *Context) Warningf(format string, params ...interface{}) {
+	//Here we use the Loggo.logger method `Logf` as opposed to
+	//`logger.Warningf` to avoid introducing an additional call stack level
+	//(since `Warningf` calls Logf internally). This is done so that this
+	//function can produce more accurate source location debug information.
+	logger.Logf(loggo.WARNING, format, params...)
 }
 
 // Verbosef will write the formatted string to Stderr if the verbose is true,
@@ -138,8 +165,21 @@ func (ctx *Context) Verbosef(format string, params ...interface{}) {
 	if ctx.verbose {
 		ctx.write(format, params...)
 	} else {
-		logger.Infof(format, params...)
+		//Here we use the Loggo.logger method `Logf` as opposed to
+		//`logger.Infof` to avoid introducing an additional call stack
+		//level (since `Infof` calls `Logf` internally). This is done so
+		//that this function can produce more accurate source location
+		//debug information.
+		logger.Logf(loggo.INFO, format, params...)
 	}
+}
+
+// WriteError will output the formatted text to the writer with
+// a colored ERROR like the logging would.
+func WriteError(writer io.Writer, err error) {
+	w := ansiterm.NewWriter(writer)
+	ansiterm.Foreground(ansiterm.BrightRed).Fprintf(w, "ERROR")
+	fmt.Fprintf(w, " %s\n", err.Error())
 }
 
 // Getenv looks up an environment variable in the context. It mirrors
@@ -159,8 +199,12 @@ func (ctx *Context) Setenv(key, value string) error {
 }
 
 // AbsPath returns an absolute representation of path, with relative paths
-// interpreted as relative to ctx.Dir.
+// interpreted as relative to ctx.Dir and with "~/" replaced with users
+// home dir.
 func (ctx *Context) AbsPath(path string) string {
+	if normalizedPath, err := utils.NormalizePath(path); err == nil {
+		path = normalizedPath
+	}
 	if filepath.IsAbs(path) {
 		return path
 	}
@@ -208,17 +252,35 @@ type Info struct {
 
 	// Aliases are other names for the Command.
 	Aliases []string
+
+	// FlagKnownAs allows different projects to customise what their flags are
+	// known as, e.g. 'flag', 'option', 'item'. All error/log messages
+	// will use that name when referring to an individual items/flags in this command.
+	// For example, if this value is 'option', the default message 'value for flag'
+	// will become 'value for option'.
+	FlagKnownAs string
+
+	// ShowSuperFlags contains the names of the 'super' command flags
+	// that are desired to be shown in the sub-command help output.
+	ShowSuperFlags []string
 }
 
 // Help renders i's content, along with documentation for any
-// flags defined in f. It calls f.SetOutput(ioutil.Discard).
+// flags defined in f.
 func (i *Info) Help(f *gnuflag.FlagSet) []byte {
+	return i.HelpWithSuperFlags(nil, f)
+}
+
+// HelpWithSuperFlags renders i's content, along with documentation for any
+// flags defined in both command and its super command flag sets.
+// Only super command flags defined in i.ShowSuperFlags are displayed, if found.
+func (i *Info) HelpWithSuperFlags(superF *gnuflag.FlagSet, f *gnuflag.FlagSet) []byte {
 	buf := &bytes.Buffer{}
 	fmt.Fprintf(buf, "Usage: %s", i.Name)
 	hasOptions := false
 	f.VisitAll(func(f *gnuflag.Flag) { hasOptions = true })
 	if hasOptions {
-		fmt.Fprintf(buf, " [options]")
+		fmt.Fprintf(buf, " [%vs]", f.FlagKnownAs)
 	}
 	if i.Args != "" {
 		fmt.Fprintf(buf, " %s", i.Args)
@@ -227,8 +289,37 @@ func (i *Info) Help(f *gnuflag.FlagSet) []byte {
 	if i.Purpose != "" {
 		fmt.Fprintf(buf, "\nSummary:\n%s\n", strings.TrimSpace(i.Purpose))
 	}
+	hasSuperFlags := false
+	if superF != nil && len(i.ShowSuperFlags) != 0 {
+		filteredSuperF := gnuflag.NewFlagSetWithFlagKnownAs("", gnuflag.ContinueOnError, superF.FlagKnownAs)
+		contains := func(one string) bool {
+			for _, a := range i.ShowSuperFlags {
+				if strings.ToLower(one) == strings.ToLower(a) {
+					return true
+				}
+			}
+			return false
+		}
+		superF.VisitAll(func(flag *gnuflag.Flag) {
+			if contains(flag.Name) {
+				hasSuperFlags = true
+				filteredSuperF.Var(flag.Value, flag.Name, flag.Usage)
+			}
+		})
+		if hasSuperFlags {
+			fmt.Fprintf(buf, "\nGlobal %vs:\n", strings.Title(filteredSuperF.FlagKnownAs))
+			filteredSuperF.SetOutput(buf)
+			filteredSuperF.PrintDefaults()
+			filteredSuperF.SetOutput(ioutil.Discard)
+		}
+	}
+
 	if hasOptions {
-		fmt.Fprintf(buf, "\nOptions:\n")
+		if hasSuperFlags {
+			fmt.Fprintf(buf, "\nCommand %vs:\n", strings.Title(f.FlagKnownAs))
+		} else {
+			fmt.Fprintf(buf, "\n%vs:\n", strings.Title(f.FlagKnownAs))
+		}
 		f.SetOutput(buf)
 		f.PrintDefaults()
 	}
@@ -257,16 +348,24 @@ func handleCommandError(c Command, ctx *Context, err error, f *gnuflag.FlagSet) 
 	case ErrSilent:
 		return 2, true
 	default:
-		fmt.Fprintf(ctx.Stderr, "error: %v\n", err)
+		WriteError(ctx.Stderr, err)
 		return 2, true
 	}
+}
+
+func FlagAlias(c Command, akaDefault string) string {
+	flagsAKA := c.Info().FlagKnownAs
+	if flagsAKA == "" {
+		return akaDefault
+	}
+	return flagsAKA
 }
 
 // Main runs the given Command in the supplied Context with the given
 // arguments, which should not include the command name. It returns a code
 // suitable for passing to os.Exit.
 func Main(c Command, ctx *Context, args []string) int {
-	f := gnuflag.NewFlagSet(c.Info().Name, gnuflag.ContinueOnError)
+	f := gnuflag.NewFlagSetWithFlagKnownAs(c.Info().Name, gnuflag.ContinueOnError, FlagAlias(c, "flag"))
 	f.SetOutput(ioutil.Discard)
 	c.SetFlags(f)
 	if rc, done := handleCommandError(c, ctx, f.Parse(c.AllowInterspersedFlags(), args), f); done {
@@ -282,7 +381,7 @@ func Main(c Command, ctx *Context, args []string) int {
 			return err.(*RcPassthroughError).Code
 		}
 		if err != ErrSilent {
-			fmt.Fprintf(ctx.Stderr, "error: %v\n", err)
+			WriteError(ctx.Stderr, err)
 		}
 		return 1
 	}
